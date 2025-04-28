@@ -13,3 +13,8 @@ Sparkfun I2c navigation pad (subject to change) - Amazon or Aliexpress
 4 button module, linear (subject to change) - Amazon or Aliexpress
 Crane Port
 MISC parts for 123A battery compartment
+
+Current issues and areas for improvement are as follows:
+Making the LRF zero-able 
+programming the ESP32
+creating a custom PCB
