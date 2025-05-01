@@ -178,21 +178,6 @@ double transonicCorrection(double cd, double mach) {
 
 // Compute ballistic trajectory and return drop/drift in mils
 
-// OLED display setup for 0.91" SSD1306 (128x32)
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32
-#define OLED_RESET    -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// BME280 environmental sensor (I2C address might be 0x76 or 0x77)
-Adafruit_BME280 bme;
-#define BME280_ADDR_PRIMARY   0x76
-#define BME280_ADDR_SECONDARY 0x77
-
-// LSM303DLHC accelerometer+magnetometer
-LSM303 compass;
-Preferences prefs;
-
 // GPIO pins for buttons
 #define PIN_BTN_UP      13
 #define PIN_BTN_DOWN    12
