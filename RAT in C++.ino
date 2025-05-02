@@ -45,6 +45,7 @@ struct ButtonState {
 HardwareSerial RangeSerial(2);
 #define PIN_RANGE_TX 17  // TX to rangefinder (if needed)
 #define PIN_RANGE_RX 16  // RX from rangefinder
+#define RANGE_BAUD 9600
 
 // Bullet data structure
 struct Bullet {
@@ -105,6 +106,10 @@ bool inWindInputMode = false;
 unsigned long windEditStartTime = 0;
 bool windEditHeld = false;
 unsigned long lastStart = 0;
+bool lastStateUp = false;
+bool lastStateDown = false;
+bool lastStateLeft = false;
+bool lastStateRight = false;
 
 
 int selectedField = 0;  // 1=Bullet, 2=Wind Speed, 3=Wind Direction (only active when editing)
@@ -177,37 +182,6 @@ double transonicCorrection(double cd, double mach) {
   }
   return cd;
 }
-
-
-// GPIO pins for buttons
-#define PIN_BTN_UP      13
-#define PIN_BTN_DOWN    12
-#define PIN_BTN_LEFT    14
-#define PIN_BTN_RIGHT   27
-#define PIN_BTN_CENTER  26  // center (select)
-#define PIN_BTN_BACK    25  // back
-#define PIN_BTN_MODE    33  // mode toggle (manual/continuous, hold for calibrate)
-#define PIN_BTN_TRIGGER 32  // external trigger for rangefinder
-
-// UART for rangefinder (using Serial2 on ESP32)
-HardwareSerial RangeSerial(2);
-#define PIN_RANGE_TX 17  // TX pin (if needed to send commands)
-#define PIN_RANGE_RX 16  // RX pin (to receive distance data)
-#define RANGE_BAUD   9600  // baud rate for rangefinder (adjust if needed)
-
-// Global state
-int currentBulletIndex = 0;
-bool continuousMode = false;
-double windSpeed = 0.0;    // wind speed (m/s)
-double windDirDeg = 0.0;   // wind direction (degrees, coming from)
-double lastRange = 0.0;    // last measured range (m)
-bool haveRange = false;
-char lastSolutionStr[24] = "";
-bool editing = false;
-bool inWindMenu = false;
-int selectedField = 0;  // 1=Bullet, 2=Wind Speed, 3=Wind Dir
-unsigned long lastStart = 0;
-
 // Button state tracking (for edge detection and long press)
 ButtonState btnUp;
 ButtonState btnDown;
@@ -218,37 +192,11 @@ ButtonState btnBack;
 ButtonState btnMode;
 ButtonState btnTrigger;
 
-// Magnetometer calibration
-LSM303::vector<int16_t> magMin, magMax;
-bool magCalibrated = false;
-
-// Utility: interpolate drag coefficient for given velocity (m/s) from drag table
-double interpolateCd(double velocity_mps, const DragEntry* table, int tableSize) {
-  double v_fps = velocity_mps * 3.28084;
-  for (int i = 0; i < tableSize - 1; ++i) {
-    if (v_fps >= table[i].vel_fps && v_fps <= table[i+1].vel_fps) {
-      double v1 = table[i].vel_fps;
-      double v2 = table[i+1].vel_fps;
-      double cd1 = table[i].Cd;
-      double cd2 = table[i+1].Cd;
-      // linear interpolation
-      return cd1 + (cd2 - cd1) * ((v_fps - v1) / (v2 - v1));
-    }
-  }
   // If velocity beyond last entry, return last Cd
   return table[tableSize - 1].Cd;
 }
 
-// Utility: apply transonic drag correction
-double transonicCorrection(double cd, double mach) {
-  // Transonic range typically between Mach 1.2 and 0.8
-  if (mach >= 0.8 && mach <= 1.2) {
-    // Linear blend from no correction (Mach 1.2) to +30% drag (Mach 0.8)
-    float t = (1.2 - mach) / 0.4;
-    t = constrain(t, 0.0, 1.0);
-    return cd * (1.0 + 0.3 * t);  // up to +30% drag
-  }
-  return cd;
+
 }
 
 double calculatePitch(const LSM303::vector<int16_t>& accel) {
@@ -818,7 +766,7 @@ if (inWindInputMode) {
   }
 
   // Handle Mode button (toggle manual/continuous or long-press for calibration)
-  if (btnMode.justPressed()) {
+  if (btnMode.justPressed) {
     // Mode button just pressed
     modePressStart = millis();
     modeHoldHandled = false;
@@ -843,7 +791,7 @@ if (inWindInputMode) {
   }
 
   // Handle Trigger button (trigger rangefinder reading)
-  if (btnTrigger.justPressed()) {
+  if (btnTrigger.justPressed) {
   if (!continuousMode) {
     sendRangefinderCommand("D");  // Manual mode triggers laser
   }
@@ -886,7 +834,7 @@ if (inWindInputMode) {
     }
   }
   // Handle arrow buttons for navigation/adjustment
-  if (btnCenter.current && !btnCenter.last) {
+  if (btnCenter.justPressed) {
     // Center pressed: toggle editing mode or confirm selection
    if (!editing && !inWindMenu) {
   // First press: enter field selection mode
@@ -920,7 +868,7 @@ if (inWindInputMode) {
     drawDisplay();
   }
 
-  if (btnBack.current && !btnBack.last) {
+  if (btnBack.justPressed) {
     // Back pressed: if editing, cancel/exit editing without saving (or simply exit)
     if (editing) {
       editing = false;
@@ -994,22 +942,31 @@ if (inWindInputMode) {
       if (selectedField < 1) selectedField = 3;
       drawDisplay();
     }
-    if (btnDown.current && !btnDown.last) {
+    if (btnDown.justPressed) {
       // Move selection down (next field)
       selectedField++;
       if (selectedField > 3) selectedField = 1;
       drawDisplay();
     }
-    if ((btnLeft.current && !btnLeft.last) || (btnRight.current && !btnRight.last) ||
-    (btnUp.current && !btnUp.last) || (btnDown.current && !btnDown.last))
+    if (btnLeft.justPressed || btnRight.justPressed || btnUp.justPressed || btnDown.justPressed)
+	    
+   bool stateUp = digitalRead(PIN_BTN_UP) == LOW;
+   bool stateDown = digitalRead(PIN_BTN_DOWN) == LOW;
+   bool stateLeft = digitalRead(PIN_BTN_LEFT) == LOW;
+   bool stateRight = digitalRead(PIN_BTN_RIGHT) == LOW;
 
   int xDirection = 0;
   int yDirection = 0;
 
-  if (stateLeft && !lastStateLeft)  xDirection = -1;
-  if (stateRight && !lastStateRight) xDirection = 1;
-  if (stateUp && !lastStateUp)    yDirection = -1;
-  if (stateDown && !lastStateDown)  yDirection = 1;
+  if (btnLeft.justPressed)  xDirection = -1;
+  if (btnRight.justPressed) xDirection = 1;
+  if (btnUp.justPressed)    yDirection = -1;
+  if (btnDown.justPressed)  yDirection = 1;
+
+  lastStateUp = stateUp;
+  lastStateDown = stateDown;
+  lastStateLeft = stateLeft;
+  lastStateRight = stateRight;
 
   if (selectedField == 1) {
     currentBulletIndex += yDirection * 2 + xDirection;
