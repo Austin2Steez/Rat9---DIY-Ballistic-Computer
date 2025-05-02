@@ -104,6 +104,8 @@ bool inWindMenu = false;
 bool inWindInputMode = false;
 unsigned long windEditStartTime = 0;
 bool windEditHeld = false;
+unsigned long lastStart = 0;
+
 
 int selectedField = 0;  // 1=Bullet, 2=Wind Speed, 3=Wind Direction (only active when editing)
 
@@ -176,7 +178,6 @@ double transonicCorrection(double cd, double mach) {
   return cd;
 }
 
-// Compute ballistic trajectory and return drop/drift in mils
 
 // GPIO pins for buttons
 #define PIN_BTN_UP      13
@@ -194,49 +195,6 @@ HardwareSerial RangeSerial(2);
 #define PIN_RANGE_RX 16  // RX pin (to receive distance data)
 #define RANGE_BAUD   9600  // baud rate for rangefinder (adjust if needed)
 
-// Bullet profile structure
-struct Bullet {
-  const char* code;
-  const char* name;
-  double bc;
-  double muzzle_velocity; // m/s
-  double weight_gr;       // grains
-  double sight_height;    // m
-  double diameter;        // m
-  char drag_model;        // '1' for G1, '7' for G7
-};
-
-// Bullet library (all bullets from original script)
-static const Bullet bulletList[] = {
-  { "308_M80",    ".308 M80 Ball",           0.400, 840.0, 147.0, 0.06985, 0.00782, '1' },
-  { "308_SUB",    ".308 Subsonic",           0.518, 325.0, 200.0, 0.06985, 0.00782, '1' },
-  { "300BLK_SUP", ".300 Blackout Supersonic",0.305, 670.0, 125.0, 0.06985, 0.00782, '7' },
-  { "300BLK_SUB", ".300 Blackout Subsonic",  0.660, 305.0, 220.0, 0.06985, 0.00782, '1' },
-  { "556_M193",   "5.56 NATO 55gr M193",     0.243, 990.0,  55.0, 0.06985, 0.00570, '1' },
-  { "68BLK_SUP",  "6.8 Blackout Supersonic", 0.370, 780.0, 110.0, 0.06985, 0.00680, '7' },
-  { "68BLK_SUB",  "6.8 Blackout Subsonic",   0.450, 330.0, 180.0, 0.06985, 0.00680, '1' }
-};
-const int NUM_BULLETS = sizeof(bulletList)/sizeof(Bullet);
-
-// Drag tables (velocity in ft/s, Cd)
-struct DragEntry { int vel_fps; double Cd; };
-static const DragEntry G1_TABLE[] = {
-  {137, 0.262}, {228, 0.230}, {274, 0.211}, {366, 0.203}, {457, 0.198},
-  {549, 0.195}, {640, 0.192}, {732, 0.188}, {823, 0.185}, {914, 0.182},
-  {1006, 0.179}, {1097, 0.176}, {1189, 0.172}, {1280, 0.169}, {1372, 0.165},
-  {1463, 0.162}, {1555, 0.159}, {1646, 0.156}, {1738, 0.152}, {1829, 0.149},
-  {1920, 0.147}, {2012, 0.144}, {2103, 0.141}
-};
-static const DragEntry G7_TABLE[] = {
-  {137, 0.120}, {228, 0.112}, {274, 0.107}, {366, 0.104}, {457, 0.102},
-  {549, 0.100}, {640, 0.098}, {732, 0.095}, {823, 0.093}, {914, 0.091},
-  {1006,0.089}, {1097,0.087}, {1189,0.085}, {1280,0.083}, {1372,0.081},
-  {1463,0.079}, {1555,0.077}, {1646,0.075}, {1738,0.073}, {1829,0.071},
-  {1920,0.069}, {2012,0.067}, {2103,0.065}
-};
-const int G1_COUNT = sizeof(G1_TABLE)/sizeof(DragEntry);
-const int G7_COUNT = sizeof(G7_TABLE)/sizeof(DragEntry);
-
 // Global state
 int currentBulletIndex = 0;
 bool continuousMode = false;
@@ -248,6 +206,7 @@ char lastSolutionStr[24] = "";
 bool editing = false;
 bool inWindMenu = false;
 int selectedField = 0;  // 1=Bullet, 2=Wind Speed, 3=Wind Dir
+unsigned long lastStart = 0;
 
 // Button state tracking (for edge detection and long press)
 ButtonState btnUp;
@@ -262,25 +221,6 @@ ButtonState btnTrigger;
 // Magnetometer calibration
 LSM303::vector<int16_t> magMin, magMax;
 bool magCalibrated = false;
-
-// Environmental constants
-const double R_AIR = 287.05;  // J/(kg·K), specific gas constant for dry air
-
-// Utility: speed of sound (approx) at given temperature (°C)
-double speedOfSound(double tempC) {
-  return sqrt(1.4 * R_AIR * (tempC + 273.15));
-}
-
-// Utility: air density (kg/m^3) given temp (°C), pressure (hPa), humidity (%)
-double airDensity(double tempC, double pressure_hPa, double humidity) {
-  double T = tempC + 273.15;
-  double P = pressure_hPa * 100.0;  // convert hPa to Pa
-  // Saturation vapor pressure (hPa) at tempC (Tetens formula)
-  double saturation_hPa = 6.1078 * pow(10.0, (7.5 * tempC) / (tempC + 237.3));
-  double vaporPressure = (humidity / 100.0) * saturation_hPa * 100.0;  // Pa
-  double dryAirPressure = P - vaporPressure;
-  return dryAirPressure / (R_AIR * T);
-}
 
 // Utility: interpolate drag coefficient for given velocity (m/s) from drag table
 double interpolateCd(double velocity_mps, const DragEntry* table, int tableSize) {
@@ -850,7 +790,6 @@ if (inWindInputMode) {
     if (backPressed) {
       finishCalibration();
       // Consume this back press so it doesn't act in normal mode
-      lastStateBack = backPressed;
       return;
     }
     // Continue calibration updates at a limited rate
@@ -866,7 +805,7 @@ if (inWindInputMode) {
 
   // BACK + CENTER combo to toggle units (metric ↔ imperial)
   static unsigned long comboStart = 0;
-  if (stateBack && stateCenter) {
+  if (btnBack.current && btnCenter.current) {
     if (comboStart == 0) comboStart = millis();
     else if (millis() - comboStart > 1000) {
       useImperial = !useImperial;
@@ -884,13 +823,13 @@ if (inWindInputMode) {
     modePressStart = millis();
     modeHoldHandled = false;
   }
-  if (stateMode && !modeHoldHandled && millis() - modePressStart > 3000) {
+  if (btnMode.current && !modeHoldHandled && millis() - modePressStart > 3000) {
     // Long press detected - enter calibration
     modeHoldHandled = true;
     startCalibration();
     // Do not toggle continuous mode on release in this case
   }
-  if (btnMode.justReleased()) {
+  if (btnMode.justReleased) {
     // Mode button released
     if (!modeHoldHandled) {
       // Short press (no calibrate triggered) - toggle mode
@@ -947,7 +886,7 @@ if (inWindInputMode) {
     }
   }
   // Handle arrow buttons for navigation/adjustment
-  if (stateCenter && !lastStateCenter) {
+  if (btnCenter.current && !btnCenter.last) {
     // Center pressed: toggle editing mode or confirm selection
    if (!editing && !inWindMenu) {
   // First press: enter field selection mode
@@ -981,7 +920,7 @@ if (inWindInputMode) {
     drawDisplay();
   }
 
-  if (stateBack && !lastStateBack) {
+  if (btnBack.current && !btnBack.last) {
     // Back pressed: if editing, cancel/exit editing without saving (or simply exit)
     if (editing) {
       editing = false;
@@ -1055,15 +994,15 @@ if (inWindInputMode) {
       if (selectedField < 1) selectedField = 3;
       drawDisplay();
     }
-    if (stateDown && !lastStateDown) {
+    if (btnDown.current && !btnDown.last) {
       // Move selection down (next field)
       selectedField++;
       if (selectedField > 3) selectedField = 1;
       drawDisplay();
     }
-    if ((stateLeft && !lastStateLeft) || (stateRight && !lastStateRight) ||
-    (stateUp && !lastStateUp) || (stateDown && !lastStateDown)) {
-  
+    if ((btnLeft.current && !btnLeft.last) || (btnRight.current && !btnRight.last) ||
+    (btnUp.current && !btnUp.last) || (btnDown.current && !btnDown.last))
+
   int xDirection = 0;
   int yDirection = 0;
 
