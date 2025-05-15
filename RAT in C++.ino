@@ -192,13 +192,6 @@ ButtonState btnBack;
 ButtonState btnMode;
 ButtonState btnTrigger;
 
-  // If velocity beyond last entry, return last Cd
-  return table[tableSize - 1].Cd;
-}
-
-
-}
-
 double calculatePitch(const LSM303::vector<int16_t>& accel) {
   return atan2(-accel.x, sqrt((float)accel.y * accel.y + (float)accel.z * accel.z));
 }
@@ -207,6 +200,17 @@ double calculateHeading() {
   return compass.heading((LSM303::vector<int>){0, 0, 1});
 }
 
+bool validateBME280() {
+  float t = bme.readTemperature();
+  float p = bme.readPressure();
+  float h = bme.readHumidity();
+
+  // Validate ranges
+  if (isnan(t) || t < -40 || t > 85) return false;
+  if (isnan(p) || p < 30000 || p > 110000) return false;
+  if (isnan(h) || h < 0 || h > 100) return false;
+  return true;
+}
 
 // Compute ballistic drop and drift in mils for current state
 void computeBallistic(double range_m, double pitchRad, double headingDeg,
@@ -576,9 +580,9 @@ void setup() {
 
   // Initialize I2C sensors
   Wire.begin();
-  bool bmeOK = bme.begin(BME280_ADDR_PRIMARY);
+  bool bmeOK = bme.begin(BME280_I2C_ADDR_PRIMARY);
   if (!bmeOK) {
-    bmeOK = bme.begin(BME280_ADDR_SECONDARY);
+    bmeOK = bme.begin(BME280_I2C_ADDR_SECONDARY);
   }
   // It's okay if BME280 fails (should not, if connected properly)
   compass.init();
@@ -621,18 +625,6 @@ void setup() {
   // Initial draw of UI
   strcpy(lastSolutionStr, "----");  // no solution yet
   drawDisplay();
-}
-
-bool validateBME280() {
-  float t = bme.readTemperature();
-  float p = bme.readPressure();
-  float h = bme.readHumidity();
-
-  // Validate ranges
-  if (isnan(t) || t < -40 || t > 85) return false;
-  if (isnan(p) || p < 30000 || p > 110000) return false;
-  if (isnan(h) || h < 0 || h > 100) return false;
-  return true;
 }
 
 void updateButtonState(ButtonState& button, int pin, unsigned long debounceDelay = 50, unsigned long longPressDuration = 1000) {
@@ -804,14 +796,7 @@ if (inWindInputMode) {
     if (!continuousMode) {
       // Recalculate ballistic solution for new range immediately
       // Get current orientation (pitch from accelerometer, heading from magnetometer)
-      if (!compass.read()) {
-  display.clearDisplay();
-  display.setCursor(0, 10);
-  display.println("Compass read error!");
-  display.display();
-  delay(1000);
-  return;
-}
+      compass.read();
       // Apply calibration if available for heading calculation
       if (magCalibrated) {
         compass.m_min = magMin;
@@ -867,7 +852,8 @@ if (inWindInputMode) {
 }
     drawDisplay();
   }
-
+  int xDirection = 0;
+  int yDirection = 0;
   if (btnBack.justPressed) {
     // Back pressed: if editing, cancel/exit editing without saving (or simply exit)
     if (editing) {
@@ -882,24 +868,24 @@ if (inWindInputMode) {
   if (editing) {
 	if (inWindMenu) {
  	 // Handle up/down to toggle between wind speed and direction
- 	 if (btnUp.justPressed()) {
+ 	 if (btnUp.justPressed) {
   	  selectedField = (selectedField == 2) ? 3 : 2;
    	 drawDisplay();
 	  }
-	  if (btnDown.justPressed()) {
+	  if (btnDown.justPressed) {
   	  selectedField = (selectedField == 3) ? 2 : 3;
    	 drawDisplay();
  	 }
 
   // Handle directional changes to value
-  if (btnLeft.justPressed() || btnRight.justPressed() ||
-      btnUp.justPressed() || btnDown.justPressed()) {
+  if (btnLeft.justPressed || btnRight.justPressed ||
+      btnUp.justPressed || btnDown.justPressed) {
 
     int delta = 0;
-    if (btnLeft.justPressed()) delta = -1;
-    if (btnRight.justPressed()) delta = 1;
-    if (btnUp.justPressed()) delta = 5;
-    if (btnDown.justPressed()) delta = -5;
+    if (btnLeft.justPressed) delta = -1;
+    if (btnRight.justPressed) delta = 1;
+    if (btnUp.justPressed) delta = 5;
+    if (btnDown.justPressed) delta = -5;
 
     if (selectedField == 2) {
       // Wind speed adjustment
@@ -936,7 +922,7 @@ if (inWindInputMode) {
 }
 
     // Navigation within editing mode
-    if (btnUp.justPressed()) {
+    if (btnUp.justPressed) {
       // Move selection up (previous field)
       selectedField--;
       if (selectedField < 1) selectedField = 3;
@@ -948,26 +934,22 @@ if (inWindInputMode) {
       if (selectedField > 3) selectedField = 1;
       drawDisplay();
     }
-    if (btnLeft.justPressed || btnRight.justPressed || btnUp.justPressed || btnDown.justPressed)
-	    
-   bool stateUp = digitalRead(PIN_BTN_UP) == LOW;
-   bool stateDown = digitalRead(PIN_BTN_DOWN) == LOW;
-   bool stateLeft = digitalRead(PIN_BTN_LEFT) == LOW;
-   bool stateRight = digitalRead(PIN_BTN_RIGHT) == LOW;
-
-  int xDirection = 0;
-  int yDirection = 0;
-
-  if (btnLeft.justPressed)  xDirection = -1;
-  if (btnRight.justPressed) xDirection = 1;
-  if (btnUp.justPressed)    yDirection = -1;
-  if (btnDown.justPressed)  yDirection = 1;
+    if (btnLeft.justPressed || btnRight.justPressed || btnUp.justPressed || btnDown.justPressed) {
+  bool stateUp = digitalRead(PIN_BTN_UP) == LOW;
+  bool stateDown = digitalRead(PIN_BTN_DOWN) == LOW;
+  bool stateLeft = digitalRead(PIN_BTN_LEFT) == LOW;
+  bool stateRight = digitalRead(PIN_BTN_RIGHT) == LOW;
 
   lastStateUp = stateUp;
   lastStateDown = stateDown;
   lastStateLeft = stateLeft;
   lastStateRight = stateRight;
-
+}
+if (btnLeft.justPressed)  xDirection = -1;
+if (btnRight.justPressed) xDirection = 1;
+if (btnUp.justPressed)    yDirection = -1;
+if (btnDown.justPressed)  yDirection = 1;
+  
   if (selectedField == 1) {
     currentBulletIndex += yDirection * 2 + xDirection;
     if (currentBulletIndex < 0) currentBulletIndex = NUM_BULLETS - 1;
@@ -1001,7 +983,6 @@ if (inWindInputMode) {
 
   drawDisplay();
 }
-
   // Continuous mode: update ballistic solution continuously
   static unsigned long lastContUpdate = 0;
   if (continuousMode && (millis() - lastContUpdate >= 100)) {
