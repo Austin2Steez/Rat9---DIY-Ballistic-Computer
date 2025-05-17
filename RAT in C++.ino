@@ -213,24 +213,26 @@ bool validateBME280() {
 }
 
 // Compute ballistic drop and drift in mils for current state
-void computeBallistic(double range_m, double pitchRad, double headingDeg,
-                      double windSpeed_mps, double windDirDeg,
-                      double& outDropMils, double& outDriftMils) {
+void computeBallistic(
+  double range_m,
+  double pitchRad,
+  double headingDeg,
+  double windSpeed_mps,
+  double windDirDeg,
+  double& outDropMils,
+  double& outDriftMils
+) {
   if (range_m <= 0) {
     outDropMils = 0.0;
     outDriftMils = 0.0;
     return;
   }
-  // Determine horizontal distance and target elevation relative to shooter
-  double horizontalRange = range_m * cos(pitchRad);
-  double targetElevation = range_m * sin(pitchRad);
-  // Use current bullet parameters
+
   const Bullet& bullet = bulletList[currentBulletIndex];
-  // Environmental measurements
   if (!validateBME280()) {
-    Wire.begin();  // Reset I2C
+    Wire.begin();
     bme.begin(BME280_I2C_ADDR_PRIMARY);
-    return; // Skip this frame
+    return;
   }
 
   double tempC = bme.readTemperature();
@@ -238,50 +240,75 @@ void computeBallistic(double range_m, double pitchRad, double headingDeg,
   double humidity = bme.readHumidity();
   double rho = airDensity(tempC, pressure_hPa, humidity);
   double sos = speedOfSound(tempC);
-  // Bullet parameters for simulation
+
+  // Initial conditions
   double g = 9.81;
-  double dt = 0.01;
-  double x = 0.0;
-  double y = bullet.sight_height;
-  double v = bullet.muzzle_velocity;
-  // Convert bullet weight to kg
+  double dt = 0.001;  // smaller for accuracy
+  double t = 0.0;
+
+  double x = 0.0; // horizontal position (downrange)
+  double y = bullet.sight_height; // height above bore
+
   double mass = bullet.weight_gr * 0.00006479891;
-  // Cross-sectional area of bullet (m^2)
   double A = PI * pow(bullet.diameter / 2.0, 2);
-  // Wind relative angle: compute angle between wind direction and shooter's heading
-  // relativeWindDeg = headingDeg - windDirDeg (mod 360)
-  double relativeWindDeg = fmod((headingDeg - windDirDeg + 360.0), 360.0);
-  double windAngleRad = relativeWindDeg * DEG_TO_RAD;
+
+  // Split velocity
+  double v0 = bullet.muzzle_velocity;
+  double vx = v0 * cos(pitchRad);
+  double vy = v0 * sin(pitchRad);
+
+  // Wind effect: resolve wind relative to heading
+  double relWindDeg = fmod((headingDeg - windDirDeg + 360.0), 360.0);
+  double windRad = relWindDeg * DEG_TO_RAD;
+  double wind_vx = windSpeed_mps * cos(windRad);
+  double wind_vy = windSpeed_mps * sin(windRad);
+
   double drift = 0.0;
-  // Select drag table based on G1 or G7
+  double horiz_distance = 0.0;
+  bool hit = false;
+
   const DragEntry* dragTable = (bullet.drag_model == '1') ? G1_TABLE : G7_TABLE;
   int dragSize = (bullet.drag_model == '1') ? G1_COUNT : G7_COUNT;
-  // Integrate trajectory until horizontal distance reached or velocity drops too low
-  while (x < horizontalRange && v > 100.0) {
+
+  while (!hit && vx > 100.0 && x < range_m * 1.5) {
+    // Update velocity magnitude for drag (projectile only)
+    double v = sqrt(vx * vx + vy * vy);
     double mach = v / sos;
     double Cd = interpolateCd(v, dragTable, dragSize);
     Cd = transonicCorrection(Cd, mach);
-    // Drag force Fd = 0.5 * rho * Cd * A * v^2
-    // Dynamic pressure = 0.5 * rho * v^2
-    // Fd = dynamic pressure * Cd * A
+
     double dynamicPressure = 0.5 * rho * v * v;
     double Fd = dynamicPressure * Cd * A;
+    double ax = -Fd / mass * (vx / v);
+    double ay = -Fd / mass * (vy / v) - g;
 
-    double a_drag = Fd / mass;
-    // Update velocity and positions
-    v -= a_drag * dt;
-    if (v < 0.1) v = 0.1;  // prevent velocity from going negative or zero
-    y -= g * dt;
-    drift += windSpeed_mps * sin(windAngleRad) * dt;
-    x += v * dt;
-    // (time t advanced by dt if needed, but we don't use time output)
+    // Wind drift is lateral, orthogonal to bullet path
+    double windEffect = wind_vy * dt; // wind_vy is perpendicular to x
+    drift += windEffect;
+
+    // Integrate
+    vx += ax * dt;
+    vy += ay * dt;
+
+    x += vx * dt;
+    y += vy * dt;
+
+    // Check if we've reached the desired range (crossed x >= range_m)
+    if (x >= range_m) {
+      horiz_distance = x;
+      hit = true;
+    }
+
+    // Safety: stop if bullet has hit the ground
+    if (y <= 0) break;
+
+    t += dt;
+    if (t > 5.0) break; // safety: 5s flight time limit
   }
-  // Compute drop and drift
-  double drop = bullet.sight_height - y - targetElevation;
-  double mils = (horizontalRange > 0.0) ? (drop / horizontalRange) * 1000.0 : 0.0;
-  double drift_mils = (horizontalRange > 0.0) ? (drift / horizontalRange) * 1000.0 : 0.0;
-  outDropMils = mils;
-  outDriftMils = drift_mils;
+
+  double drop = bullet.sight_height - y;
+  outDropMils = (horiz_distance > 0.0) ? (drop / horiz_distance) * 1000.0 : 0.0;
+  outDriftMils = (horiz_distance > 0.0) ? (drift / horiz_distance) * 1000.0 : 0.0;
 }
 
 // Draw the current UI (ballistic solution and fields)
@@ -674,54 +701,23 @@ void loop() {
   updateButtonState(btnTrigger, PIN_BTN_TRIGGER);
 
 // Step 2: Handle entering wind input mode via long RIGHT press
+// WIND MENU ACTIVATION - long press RIGHT button
 if (btnRight.current && !windEditHeld && btnRight.pressStart > 0 &&
     (millis() - btnRight.pressStart >= 1000)) {
-  inWindInputMode = true;
   windEditHeld = true;
-  drawDisplay();  // Reflect change in UI
+  showWindMenu(); // Call the new wind menu
+  drawDisplay(); // Optional: show minimal screen after
+  // Wait until CENTER is pressed to return to main UI, if you want this workflow
+  while (!btnCenter.justPressed) {
+    updateButtonState(btnCenter, PIN_BTN_CENTER);
+    delay(10);
+  }
+  drawDisplay(); // return to main UI after
 }
 
 if (!btnRight.current) {
-  windEditHeld = false;  // Reset for next long press
+  windEditHeld = false;
 }
-
-// If we're in wind input mode, override normal input logic
-if (inWindInputMode) {
-  // Adjust wind speed with LEFT/RIGHT
-  if (btnLeft.justPressed) {
-    windSpeed -= 0.5;
-    if (windSpeed < 0) windSpeed = 0;
-    drawDisplay();
-  }
-  if (btnRight.justPressed) {
-    windSpeed += 0.5;
-    drawDisplay();
-  }
-
-  // Adjust wind direction with UP/DOWN
-  if (btnUp.justPressed) {
-    windDirDeg += 5.0;
-    if (windDirDeg >= 360) windDirDeg -= 360;
-    drawDisplay();
-  }
-  if (btnDown.justPressed) {
-    windDirDeg -= 5.0;
-    if (windDirDeg < 0) windDirDeg += 360;
-    drawDisplay();
-  }
-
-  // Exit wind input mode with BACK or CENTER
-  if (btnBack.justPressed || btnCenter.justPressed) {
-    prefs.putDouble("windSpeed", windSpeed);
-    prefs.putDouble("windDir", windDirDeg);
-    inWindInputMode = false;
-    drawDisplay();
-    delay(300);  // Basic debounce so you don’t immediately trigger other inputs
-  }
-
-  return;  // Skip rest of loop while in wind mode
-}
-
 
   // If in calibration mode, handle calibration process
   if (calibrating) {
@@ -952,8 +948,8 @@ if (btnDown.justPressed)  yDirection = 1;
   
   if (selectedField == 1) {
     currentBulletIndex += yDirection * 2 + xDirection;
-    if (currentBulletIndex < 0) currentBulletIndex = NUM_BULLETS - 1;
-    if (currentBulletIndex >= NUM_BULLETS) currentBulletIndex = 0;
+    if (currentBulletIndex < 0) currentBulletIndex += NUM_BULLETS;
+    currentBulletIndex = currentBulletIndex % NUM_BULLETS;
     } else if (selectedField == 2) {
       windSpeed += xDirection * 1.0 + yDirection * 5.0;
       windSpeed = constrain(windSpeed, 0.0, 50.0);  // Clamp wind speed (m/s) to 0–50
@@ -1023,4 +1019,72 @@ if (btnDown.justPressed)  yDirection = 1;
       }
     }
   }
+void showWindMenu() {
+  bool editing = true;
+  unsigned long lastDraw = 0;
+
+  while (editing) {
+    // Poll button states
+    updateButtonState(btnUp,      PIN_BTN_UP);
+    updateButtonState(btnDown,    PIN_BTN_DOWN);
+    updateButtonState(btnLeft,    PIN_BTN_LEFT);
+    updateButtonState(btnRight,   PIN_BTN_RIGHT);
+    updateButtonState(btnCenter,  PIN_BTN_CENTER);
+    updateButtonState(btnBack,    PIN_BTN_BACK);
+
+    // Edit wind speed/direction
+    if (btnLeft.justPressed)  windSpeed -= 0.5;
+    if (btnRight.justPressed) windSpeed += 0.5;
+    if (btnUp.justPressed)    windDirDeg += 5.0;
+    if (btnDown.justPressed)  windDirDeg -= 5.0;
+
+    if (windSpeed < 0) windSpeed = 0;
+    if (windSpeed > 50) windSpeed = 50;
+    if (windDirDeg < 0) windDirDeg += 360;
+    if (windDirDeg >= 360) windDirDeg -= 360;
+
+    // Exit with CENTER or BACK
+    if (btnCenter.justPressed || btnBack.justPressed) {
+      // Save wind settings
+      prefs.putDouble("windSpeed", windSpeed);
+      prefs.putDouble("windDir", windDirDeg);
+      editing = false;
+      break;
+    }
+
+    // Redraw display every 50ms (no flicker)
+    if (millis() - lastDraw > 50) {
+      display.clearDisplay();
+      display.setTextSize(2);
+      display.setTextColor(SSD1306_WHITE);
+
+      display.setCursor(0, 0);
+      display.print("WIND MENU");
+
+      display.setTextSize(1);
+      display.setCursor(0, 18);
+      display.print("Speed:");
+      display.setTextSize(2);
+      display.setCursor(0, 28);
+      display.print(windSpeed, 1);
+      display.print(" m/s");
+
+      display.setTextSize(1);
+      display.setCursor(0, 46);
+      display.print("Dir:");
+      display.setTextSize(2);
+      display.setCursor(40, 46);
+      display.print((int)windDirDeg);
+      display.print((char)247); // Degree symbol
+
+      display.setTextSize(1);
+      display.setCursor(72, 54);
+      display.print("BACK/CENTER=EXIT");
+
+      display.display();
+      lastDraw = millis();
+    }
+    delay(10); // avoid busy loop
+  }
+}
 }
