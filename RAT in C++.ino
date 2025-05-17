@@ -199,7 +199,11 @@ double calculatePitch(const LSM303::vector<int16_t>& accel) {
 double calculateHeading() {
   return compass.heading((LSM303::vector<int>){0, 0, 1});
 }
-
+const char* getCardinalDirection(double headingDeg) {
+  static const char* dirs[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW", "N" };
+  int idx = int((headingDeg + 22.5) / 45.0); // 360/8=45 deg per sector
+  return dirs[idx % 8];
+}
 bool validateBME280() {
   float t = bme.readTemperature();
   float p = bme.readPressure();
@@ -364,6 +368,13 @@ void drawDisplay() {
     display.print(" ");
     display.print(rangeStr);
   }
+  // Line 1.5: Compass Heading and Cardinal
+  compass.read();
+  double headingDeg = calculateHeading();
+  display.setCursor(70, 0);  // Or adjust to fit your display layout
+  char hdgStr[12];
+  snprintf(hdgStr, sizeof(hdgStr), "%03d%c %s", (int)headingDeg, 0xB0, getCardinalDirection(headingDeg));
+  display.print(hdgStr);
 
   // Line 2: Wind
   display.setCursor(0, 8);
